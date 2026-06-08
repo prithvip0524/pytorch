@@ -2057,9 +2057,16 @@ class MetaConverter(Generic[_TensorT]):
                         raise AssertionError("t.storage must not be None")
                     from torch.fx.experimental.symbolic_shapes import (
                         guard_or_false,
+                        statically_known_true,
                         sym_eq,
                     )
 
+                    storage_needs_resize = False
+                    if not r.is_nested:
+                        r_storage = r.untyped_storage()
+                        storage_needs_resize = not statically_known_true(
+                            s.size == 0
+                        ) and statically_known_true(r_storage.size() < s.size)
                     if s.id not in self.storage_memo and (
                         r.is_nested
                         or (
@@ -2067,6 +2074,18 @@ class MetaConverter(Generic[_TensorT]):
                             and guard_or_false(r.storage_offset() == storage_offset)
                         )
                     ):
+                        if not r.is_nested:
+                            # The freshly allocated tensor storage can stand in
+                            # for the source storage only if it covers the whole
+                            # storage. Parameters made from views are not
+                            # autograd views, but can still share a larger
+                            # storage with later parameters. Leave symbolic
+                            # sizes alone; this preserves the fast path for
+                            # dynamic inputs without adding storage-size guards.
+                            # Zero-sized source storages are handled by the
+                            # resize_(0) below.
+                            if storage_needs_resize:
+                                r.untyped_storage().resize_(s.size)
                         # You're normal and happy, install the fresh storage into the memo
                         self.set_storage_memo(s, r.untyped_storage())
                         if self.copy_data:
@@ -2076,9 +2095,42 @@ class MetaConverter(Generic[_TensorT]):
                                 raise AssertionError(
                                     "r.real_tensor must not be None when copy_data is True"
                                 )
-                            _set_real_storage(
-                                r.untyped_storage(), r.real_tensor.untyped_storage()
-                            )
+                            if statically_known_true(s.size == 0):
+                                _set_real_storage(
+                                    r.untyped_storage(),
+                                    r.real_tensor.untyped_storage(),
+                                )
+                            else:
+                                if t.size is None:
+                                    raise AssertionError(
+                                        "t.size must not be None when copy_data is True"
+                                    )
+                                if t.stride is None:
+                                    raise AssertionError(
+                                        "t.stride must not be None when copy_data is True"
+                                    )
+                                if t.data is None:
+                                    raise AssertionError(
+                                        "t.data must not be None when copy_data is True"
+                                    )
+                                with torch.no_grad(), no_dispatch():
+                                    if _is_fake_tensor(t.data):
+                                        if t.data.real_tensor is None:
+                                            raise AssertionError(
+                                                "t.data.real_tensor must not be None when copy_data is True"
+                                            )
+                                        real_storage = (
+                                            t.data.real_tensor.untyped_storage().clone()
+                                        )
+                                    else:
+                                        real_storage = t.data.untyped_storage().clone()
+                                    _set_real_storage(r.untyped_storage(), real_storage)
+                                    r.real_tensor.set_(
+                                        real_storage,
+                                        t.storage_offset,
+                                        t.size,
+                                        t.stride,
+                                    )
                     else:
                         # You're in crazy town; somehow you gave us a tensor
                         # that wasn't a view, but had nonzero storage offset,
