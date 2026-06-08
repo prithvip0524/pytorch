@@ -139,16 +139,18 @@ def _codegen_wrap_subclass(
     """Emit code to reconstruct one subclass output. Returns the variable name."""
     inner_dict_var = state.fresh_name("_out_inner")
     entries: list[str] = []
+    attr_exprs: dict[str, str] = {}
 
     for attr, attr_meta in meta.attrs.items():
         match attr_meta:
             case PlainTensorMeta() | OpaqueMeta():
                 idx = out_idx_ref[0]
                 out_idx_ref[0] += 1
-                entries.append(f"{attr!r}: unwrapped_outs[{idx}]")
+                attr_expr = f"unwrapped_outs[{idx}]"
             case SubclassCreationMeta():
-                nested_var = _codegen_wrap_subclass(state, attr_meta, out_idx_ref)
-                entries.append(f"{attr!r}: {nested_var}")
+                attr_expr = _codegen_wrap_subclass(state, attr_meta, out_idx_ref)
+        attr_exprs[attr] = attr_expr
+        entries.append(f"{attr!r}: {attr_expr}")
 
     state.emit(f"{inner_dict_var} = {{{', '.join(entries)}}}")
 
@@ -171,8 +173,17 @@ def _codegen_wrap_subclass(
             return f"({parts[0]},)"
         return f"({', '.join(parts)})"
 
-    size_expr = _build_tuple(meta.outer_size, size_placeholders)
-    stride_expr = _build_tuple(meta.outer_stride, stride_placeholders)
+    outer_size_from_attr = meta.outer_size_from_attr
+    outer_stride_from_attr = meta.outer_stride_from_attr
+    if outer_size_from_attr is not None:
+        size_expr = f"{attr_exprs[outer_size_from_attr]}.size()"
+    else:
+        size_expr = _build_tuple(meta.outer_size, size_placeholders)
+
+    if outer_stride_from_attr is not None:
+        stride_expr = f"{attr_exprs[outer_stride_from_attr]}.stride()"
+    else:
+        stride_expr = _build_tuple(meta.outer_stride, stride_placeholders)
 
     type_name = state.add_global(
         state.fresh_name("_subclass_type"),
@@ -209,7 +220,7 @@ def _emit_output_wrapping(
         else:
             result_var = _codegen_wrap_subclass(state, meta, out_idx_ref)
             result_exprs.append(result_var)
-            num_args_tallied += meta.arg_count
+            num_args_tallied = max(num_args_tallied, out_idx_ref[0])
 
     return result_exprs, num_args_tallied
 
@@ -284,12 +295,13 @@ def _codegen_subclass_wrapper_source(
     state.emit("unwrapped_outs = compiled_fn(unwrapped_args)")
 
     # --- Output wrapping ---
-    result_exprs, num_args_tallied = _emit_output_wrapping(state, out_metas)
+    result_exprs, _ = _emit_output_wrapping(state, out_metas)
     result_tuple = f"({', '.join(result_exprs)},)" if result_exprs else "()"
     if num_fw_outs_saved_for_bw is not None:
         state.emit(
-            f"return {result_tuple} + tuple(unwrapped_outs[{num_args_tallied}:])"
+            f"_activation_start = len(unwrapped_outs) - {num_fw_outs_saved_for_bw}"
         )
+        state.emit(f"return {result_tuple} + tuple(unwrapped_outs[_activation_start:])")
     else:
         state.emit(f"return {result_tuple}")
 
