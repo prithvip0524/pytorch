@@ -577,6 +577,7 @@ def _process_equalities(
                     source=torch._dynamo.source.ConstantSource(constraint.root.name),
                     dynamic_dim=torch.fx.experimental.symbolic_shapes.DimDynamic.DYNAMIC,
                     constraint_dim=constraint.root.constraint_range,
+                    do_not_specialize_zero_one=True,
                 )
                 phantom_symbols[constraint.root.name] = root
 
@@ -1216,6 +1217,10 @@ def _process_dynamic_shapes(
         tensor._dynamo_dynamic_range = set()
         tensor._dynamo_static_indices = set()
         tensor._dynamo_unbacked_indices = set()
+        tensor._dynamo_strict_unbacked_indices = set()
+        tensor._dynamo_hint_overrides = {}
+        tensor._dynamo_shape_ids = {}
+        tensor._dynamo_unbacked_bounds = {}
 
         if isinstance(shape, dict):
             for i, dim in shape.items():
