@@ -27,6 +27,7 @@ from torch.testing._internal.common_device_type import (
     OpDTypes,
     ops,
     skipCPUIf,
+    skipCUDAIf,
     skipOps,
     skipXPUIf,
 )
@@ -48,11 +49,11 @@ from torch.testing._internal.common_utils import (
 from torch.testing._internal.inductor_utils import (
     GPU_TYPE,
     HAS_CPU,
+    HAS_CUDA_AND_TRITON,
     has_triton,
     HAS_XPU_AND_TRITON,
     maybe_skip_size_asserts,
 )
-from torch.testing._internal.triton_utils import requires_gpu_and_triton
 from torch.utils._dtype_abbrs import dtype_abbrs
 from torch.utils._python_dispatch import TorchDispatchMode
 from torch.utils._pytree import tree_map
@@ -259,9 +260,13 @@ inductor_expected_failures_single_sample["cpu"] = {
     ("sparse.mm", "reduce"): {f32, f64, f16},
     "sparse.sampled_addmm": {f32, f64},
     "to_sparse": {
+        b8,
+        f16,
         f32,
         f64,
-    },  # NYI: could not find kernel for aten.view.default at dispatch key DispatchKey.SparseCPU
+        i32,
+        i64,
+    },  # Sparse tensor outputs are not supported by torch.compile fullgraph.
     "view_as_complex": {f16},
 }
 
@@ -343,6 +348,11 @@ inductor_should_fail_with_exception["cpu"] = {}
 inductor_should_fail_with_exception["cuda"] = {}
 inductor_should_fail_with_exception["xpu"] = {}
 
+if IS_MACOS:
+    inductor_should_fail_with_exception["cpu"]["remainder"] = {
+        i64: "ZeroDivisionError",
+    }
+
 
 def get_skips_and_xfails(from_dict, xfails=True):
     retval = set()
@@ -408,13 +418,18 @@ inductor_override_kwargs["cpu"] = {
         "atol": 1e-3,
         "rtol": 1e-4,
     },
-    ("_unsafe_masked_index_put_accumulate", f16): {"atol": 1e-4, "rtol": 0.01},
     # Following tests are failing with strict comparison but atol=1 is acceptable due roundings errors
     ("nn.functional.interpolate.bilinear", u8): {"atol": 1, "rtol": 0},
     ("nn.functional.upsample_bilinear", u8): {"atol": 1, "rtol": 0},
     ("nn.functional.interpolate.bicubic", u8): {"atol": 1, "rtol": 0},
     # High atol due to precision loss
     ("nn.functional.interpolate.bicubic", f32): {"atol": 5e-3, "rtol": 0},
+    ("add", f16): {"atol": 2e-3, "rtol": 0.002},
+    ("_softmax_backward_data", f16): {
+        "reference_in_float": False,
+        "atol": 0.008,
+        "rtol": 0.002,
+    },
 }
 
 inductor_override_kwargs["cuda"] = {
@@ -1017,6 +1032,13 @@ inductor_skip_exact_stride = {
     "tensordot",
 }
 
+# On CPU, Inductor may choose a different valid layout for these ops.
+inductor_skip_exact_stride_cpu = {
+    "einsum",
+    "nn.functional.max_unpool2d",
+    "nn.functional.max_unpool2d.grad",
+}
+
 # On XPU, Inductor may apply additional layout optimizations that can change
 # tensor strides compared to eager mode, so exact stride checks are relaxed
 # for certain ops.
@@ -1243,7 +1265,7 @@ class TestInductorOpInfo(TestCase):
     @skipCUDAMemoryLeakCheckIf(
         True
     )  # inductor kernels failing this test intermittently
-    @requires_gpu_and_triton
+    @skipCUDAIf(not HAS_CUDA_AND_TRITON, "Skipped! Triton not found")
     @skipXPUIf(
         not HAS_XPU_AND_TRITON, "Skipped! Supported XPU compiler and Triton not found"
     )
@@ -1465,6 +1487,8 @@ class TestInductorOpInfo(TestCase):
 
                         # Call the appropriate check method based on device type
                         exact_stride = op_name not in inductor_skip_exact_stride
+                        if exact_stride and device_type == "cpu":
+                            exact_stride = op_name not in inductor_skip_exact_stride_cpu
                         # XPU has additional layout optimizations that change strides differently from eager mode.
                         if exact_stride and GPU_TYPE == "xpu":
                             exact_stride = op_name not in inductor_skip_exact_stride_xpu
