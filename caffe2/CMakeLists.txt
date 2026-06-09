@@ -636,6 +636,10 @@ if(USE_ROCM)
     append_filelist("libtorch_cuda_distributed_base_sources" Caffe2_HIP_SRCS)
     if(NOT WIN32)
       append_filelist("libtorch_cuda_distributed_extra_sources" Caffe2_HIP_SRCS)
+      list(REMOVE_ITEM Caffe2_HIP_SRCS
+        ${TORCH_SRC_DIR}/csrc/distributed/c10d/symm_mem/NCCLSymmetricMemory.cu
+        ${TORCH_SRC_DIR}/csrc/distributed/c10d/symm_mem/nccl_extension.cu
+        ${TORCH_SRC_DIR}/csrc/distributed/c10d/symm_mem/ops/nccl_reduce_scatter_offset.cu)
     endif()
   endif()
   # caffe2_nvrtc's stubs to driver APIs are useful for HIP.
