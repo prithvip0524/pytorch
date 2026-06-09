@@ -178,20 +178,24 @@ def _(tensor: torch.Tensor) -> torch.Tensor:
 def reload(
     tensor: torch.Tensor,
     device: torch.device,
+    original_size: list[int],
+    original_stride: list[int],
 ) -> torch.Tensor:
     """Async reload a CPU tensor to GPU on the dedicated transfer stream.
 
     The GPU tensor is allocated on the compute stream to avoid cross-stream
     allocator ownership issues. The H2D copy runs on the transfer stream.
     The completion event is keyed by the output tensor's data_ptr.
+
+    ``original_size`` and ``original_stride`` restore the GPU tensor's
+    original layout (which may be non-contiguous, e.g. from transpose).
     """
     transfer_stream = _get_or_create_transfer_stream(device)
     current_stream = torch.accelerator.current_stream(device)
 
-    # Allocate on compute stream so the allocator tracks ownership correctly.
-    # Use empty (not empty_like) to get a contiguous tensor matching the
-    # contiguous CPU buffer produced by offload.
-    result = torch.empty(tensor.shape, dtype=tensor.dtype, device=device)
+    result = torch.empty_strided(
+        original_size, original_stride, dtype=tensor.dtype, device=device
+    )
     completion_event = _register_wait(result, device)
 
     transfer_stream.wait_stream(current_stream)
@@ -208,8 +212,12 @@ def reload(
 def _(
     tensor: torch.Tensor,
     device: torch.device,
+    original_size: list[int],
+    original_stride: list[int],
 ) -> torch.Tensor:
-    return torch.empty(tensor.shape, dtype=tensor.dtype, device=device)
+    return torch.empty_strided(
+        original_size, original_stride, dtype=tensor.dtype, device=device
+    )
 
 
 # ao::wait_tensor is defined via torch.library with an aliasing schema so the
