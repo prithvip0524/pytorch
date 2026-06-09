@@ -15707,7 +15707,7 @@ def forward(self, arg0_1: "Sym(s77)", arg1_1: "Sym(s27)", arg2_1: "Sym(s53)", ar
                 # 'i1 + 3 * i0' is cached.
                 self.assertTrue(
                     "i0 + 2 * i1" in mul_buf.data.inner_fn_str()
-                    or "i0 + i1 * s64" in mul_buf.data.inner_fn_str()
+                    or re.search(r"\bi0 \+ i1 \* s\d+\b", mul_buf.data.inner_fn_str())
                 )
 
         with add_scheduler_init_hook(hook_fn):

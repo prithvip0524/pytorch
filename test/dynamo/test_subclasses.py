@@ -2470,7 +2470,9 @@ class GraphModule(torch.nn.Module):
         def _get_views(t):  # returns (view: Tensor, expects_raises_false)
             # Note that any closed-over SymInts will be symbolicized during fake-ification.
             yield t.narrow(dim=-1, start=3, length=8), False
-            yield t.split(5, -1)[2], False
+            # Without duck sizing, this currently exposes a compound storage
+            # offset whose symbols are not yet cached by the root tracer.
+            yield t.split(5, -1)[2], dynamic
             yield t.split_with_sizes([9, 6], -1)[1], False
             yield t.unsqueeze(-1).expand(4, 15, 10), False
             yield t.select(-1, 6), False
@@ -2527,7 +2529,7 @@ class GraphModule(torch.nn.Module):
             **kwargs: Any,
         ):
             if dynamic:
-                self.assertEqual(static_input_idxs, [2, 3, 4])
+                self.assertEqual(static_input_idxs, [3, 4, 5])
             else:
                 self.assertEqual(static_input_idxs, [1, 2])
             return gm
