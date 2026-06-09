@@ -6480,18 +6480,10 @@ def forward(self, x_1):
     return view""",
         )
 
-        # torch.cond triggers the check of the branches because the predicate
-        # is a SymBool.
-        with self.assertRaisesRegex(
-            # Should be
-            # torch._dynamo.exc.Unsupported,
-            # "Encountered aliasing during higher order op tracing for HOP.*"
-            torch._dynamo.exc.UncapturedHigherOrderOpError,
-            r"Higher Order Operator: torch\.cond",
-        ):
-            make_fx(torch.func.functionalize(f), tracing_mode="symbolic")(
-                *example_inputs
-            )
+        # With the SymBool predicate, cond checks the branches; output-input
+        # aliasing is now allowed, so symbolic tracing succeeds instead of
+        # raising.
+        make_fx(torch.func.functionalize(f), tracing_mode="symbolic")(*example_inputs)
 
     def test_cond_functionalized_nested_input_mutation(self):
         def true_true_fn(x):
@@ -6590,17 +6582,12 @@ def forward(self, x_1):
             return cond(pred, true_fn, false_fn, [x])
 
         example_input = torch.ones(5, 5)
+        # Output-input aliasing is now allowed in torch.cond, so this no
+        # longer raises.
         try:
             example_input_func = to_fun_old(example_input)
             torch._enable_functionalization(reapply_views=False)
-            with self.assertRaisesRegex(
-                # Should be
-                # torch._dynamo.exc.Unsupported,
-                # "Encountered aliasing during higher order op tracing for HOP.*"
-                torch._dynamo.exc.UncapturedHigherOrderOpError,
-                r"Higher Order Operator: torch\.cond",
-            ):
-                f(example_input_func)
+            f(example_input_func)
         finally:
             torch._disable_functionalization()
 
@@ -6627,14 +6614,8 @@ def forward(self, x_1):
 
             return wrapper
 
-        with self.assertRaisesRegex(
-            # Should be
-            # torch._dynamo.exc.Unsupported,
-            # "Encountered aliasing during higher order op tracing for HOP.*"
-            torch._dynamo.exc.UncapturedHigherOrderOpError,
-            r"Higher Order Operator: torch\.cond",
-        ):
-            make_fx(f_wrapper(f), tracing_mode="symbolic")(example_input)
+        # Aliasing no longer raises; symbolic tracing succeeds.
+        make_fx(f_wrapper(f), tracing_mode="symbolic")(example_input)
 
     def test_cond_functionalized_aot_func_check_functional(self):
         def true_fn(x):
@@ -6778,12 +6759,13 @@ def forward(self, arg0_1):
             return cond(y, true_fn, false_fn, [x])
 
         x = torch.randn(4)
+        # true_fn returns a single tensor while false_fn returns a 2-tuple, so
+        # the branches have mismatched output specs. (false_fn also aliases the
+        # input, which is now allowed for cond, so the output-spec mismatch is
+        # the error that surfaces.)
         with self.assertRaisesRegex(
-            # Should be
-            # torch._dynamo.exc.Unsupported,
-            # "Encountered aliasing during higher order op tracing for HOP.*"
-            torch._dynamo.exc.UncapturedHigherOrderOpError,
-            r"Higher Order Operator: torch\.cond",
+            torch._dynamo.exc.TorchRuntimeError,
+            "Unmatched output spec from torch.cond branches",
         ):
             make_fx(f)(x, torch.tensor(False))
 
@@ -6954,12 +6936,13 @@ def forward(self, arg0_1):
             return cond(y, true_fn, false_fn, [x])
 
         x = torch.randn(4)
+        # true_fn returns a single tensor while false_fn returns a 2-tuple, so
+        # the branches have mismatched output specs. (false_fn also aliases the
+        # input, which is now allowed for cond, so the output-spec mismatch is
+        # the error that surfaces.)
         with self.assertRaisesRegex(
-            # Should be
-            # torch._dynamo.exc.Unsupported,
-            # "Encountered aliasing during higher order op tracing for HOP.*"
-            torch._dynamo.exc.UncapturedHigherOrderOpError,
-            r"Higher Order Operator: torch\.cond",
+            torch._dynamo.exc.TorchRuntimeError,
+            "Unmatched output spec from torch.cond branches",
         ):
             make_fx(f, tracing_mode="fake")(x, torch.tensor(False))
 
@@ -9249,21 +9232,40 @@ class GraphModule(torch.nn.Module):
             )
 
     def test_input_output_alias(self):
+        # Output-input aliasing is now allowed in torch.cond: branches are
+        # mutually exclusive and outputs are materialized as fresh tensors, so
+        # returning an operand (or a view of it) is safe.
         def fn(f, *args):
             return torch.cond(args[0].sum() > 0, f, f, args)
 
         x = torch.randn(2, 2)
         for f in ALIAS_FN:
-            with self.assertRaisesRegex(
-                # Should be
-                # torch._dynamo.exc.Unsupported,
-                # "Encountered aliasing during higher order op tracing for HOP.*"
-                torch._dynamo.exc.UncapturedHigherOrderOpError,
-                r"Higher Order Operator: torch\.cond",
-            ):
-                torch.compile(fn)(f, x)
+            self.assertEqual(torch.compile(fn)(f, x), fn(f, x))
+
+    def test_cond_output_input_alias_is_materialized(self):
+        # Output-input aliasing is handled by materialization: a branch output
+        # that aliases an input is cloned during functionalization so the cond
+        # output never shares storage with an input. Verify through the
+        # AOTAutograd functionalization path (aot_eager).
+        def identity(x):
+            return x
+
+        def fn(x):
+            return torch.cond(x.sum() > 0, identity, identity, (x,))
+
+        x = torch.randn(2, 2)
+        x_ref = x.clone()
+        out = torch.compile(fn, backend="aot_eager", fullgraph=True)(x)
+        self.assertEqual(out, x)
+        # Materialized: the output is a fresh tensor, not the input.
+        self.assertNotEqual(out.data_ptr(), x.data_ptr())
+        # Mutating the output must not affect the input.
+        out.add_(1.0)
+        self.assertEqual(x, x_ref)
 
     def test_input_input_alias(self):
+        # Input-input aliasing (two operands sharing storage) is now allowed:
+        # the branches only read their inputs, so read-only aliasing is safe.
         def fn(view_f, arg):
             def f(arg1, arg2):
                 return arg1.cos(), arg2.sin()
@@ -9271,17 +9273,8 @@ class GraphModule(torch.nn.Module):
             return torch.cond(arg.sum() > 0, f, f, (arg, view_f(arg)))
 
         x = torch.randn(2, 2)
-        # ALIAS_FN[0] is an identical function, cond optimizes the duplication
-        # as a result of auto lifting.
         for view_f in ALIAS_FN[1:]:
-            with self.assertRaisesRegex(
-                # Should be
-                # torch._dynamo.exc.Unsupported,
-                # "Encountered aliasing during higher order op tracing for HOP.*"
-                torch._dynamo.exc.UncapturedHigherOrderOpError,
-                r"Higher Order Operator: torch\.cond",
-            ):
-                torch.compile(fn)(view_f, x)
+            self.assertEqual(torch.compile(fn)(view_f, x), fn(view_f, x))
 
     @parametrize("inference_mode", [True, False])
     def test_input_mutation(self, inference_mode):
