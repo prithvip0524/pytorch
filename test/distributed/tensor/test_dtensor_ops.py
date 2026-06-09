@@ -829,7 +829,6 @@ ops_unbacked_dtensor_dde = {
     xfail("nn.functional.conv_transpose1d"),
     xfail("nn.functional.conv_transpose2d"),
     xfail("nn.functional.conv_transpose3d"),
-    xfail("nn.functional.cosine_embedding_loss"),
     xfail("nn.functional.glu"),
     xfail("nn.functional.hinge_embedding_loss"),
     xfail("nn.functional.interpolate", "nearest"),
