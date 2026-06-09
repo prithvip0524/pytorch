@@ -5857,6 +5857,16 @@ class TemplateBuffer(OperationBuffer):
         return tuple(walk(structured, []))
 
 
+@dataclasses.dataclass(frozen=True)
+class FlexGemmEpilogueConfig:
+    epilogue_name: str
+    epilogue_source: str
+    gemm_op: str
+    alpha: float
+    beta: float
+    out_dtype: Any | None = None
+
+
 class TritonTemplateBuffer(TemplateBuffer):
     def __init__(
         self,
