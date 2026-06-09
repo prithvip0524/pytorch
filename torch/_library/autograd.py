@@ -24,7 +24,13 @@ class Info:
 def make_autograd_impl(op: _ops.OpOverload, info: InfoProtocol) -> Callable:
     name: str = f"GeneratedBackwardFor_{op._namespace}_{op._opname}_{op._overloadname}"
 
+    schema = op._schema
     has_kwarg_only_args = utils.has_kwarg_only_args(op._schema)
+    num_positional_args = sum(not a.kwarg_only for a in schema.arguments)
+    has_tensorlist_like_args = any(
+        utils.is_tensorlist_like_type(a.type)
+        for a in (*schema.arguments, *schema.returns)
+    )
 
     @dataclass
     class Metadata:
@@ -74,12 +80,28 @@ def make_autograd_impl(op: _ops.OpOverload, info: InfoProtocol) -> Callable:
         if info._backward_fn:
             try:
                 prev_needs_input_grad = ctx.needs_input_grad
-                ctx.needs_input_grad = ctx.needs_input_grad[:-1]
+                ctx.needs_input_grad = prev_needs_input_grad[:-1]
                 result = info._backward_fn(ctx, *grads)
             finally:
                 ctx.needs_input_grad = prev_needs_input_grad
+            num_actual_inputs = len(prev_needs_input_grad) - 1
+            valid_return_counts = {num_actual_inputs, num_positional_args}
+            actual = len(result) if isinstance(result, tuple) else 1
+            if actual not in valid_return_counts:
+                expected = (
+                    str(num_actual_inputs)
+                    if num_actual_inputs == num_positional_args
+                    else f"{num_actual_inputs} or {num_positional_args}"
+                )
+                raise RuntimeError(
+                    f"The backward formula for {op} returned an incorrect "
+                    f"number of gradients (expected {expected}, got {actual}). "
+                    f"Expected one gradient for each forward input, or for "
+                    f"each positional input to the operator. Use None for "
+                    f"inputs that do not require a gradient."
+                )
             if isinstance(result, tuple):
-                return (*result, None)
+                return (*result[:num_actual_inputs], None)
             return result, None
         raise RuntimeError(
             f"Trying to backward through {op} but no autograd "
@@ -96,11 +118,7 @@ def make_autograd_impl(op: _ops.OpOverload, info: InfoProtocol) -> Callable:
         },
     )
 
-    schema = op._schema
-    if any(
-        utils.is_tensorlist_like_type(a.type)
-        for a in (*schema.arguments, *schema.returns)
-    ):
+    if has_tensorlist_like_args:
         Generated = supports_tensorlist(Generated)
 
     # The dispatcher passes any keyword-only-args as kwargs and the
